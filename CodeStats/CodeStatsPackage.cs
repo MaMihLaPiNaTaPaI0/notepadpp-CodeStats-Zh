@@ -386,13 +386,20 @@ namespace CodeStats
                 bool isInsert = (notification.ModificationType & (int)SciMsg.SC_MOD_INSERTTEXT) != 0;
                 bool isUser = (notification.ModificationType & (int)SciMsg.SC_PERFORMED_USER) != 0;
 
-                if (isInsert && isUser && notification.length > 0)
+                // 移除了不存在的 length 字段，改为读取文本指针
+                if (isInsert && isUser && notification.text != IntPtr.Zero)
                 {
-                    // 按照 UTF-8 字节数计算，一个汉字 3 个字节，向上取整
-                    int xpToAdd = (int)Math.Ceiling((double)notification.length / 3);
-                    
-                    // 防粘贴刷分限制：单次最多计算 15 XP
-                    if (xpToAdd > 15) xpToAdd = 15;
+                    int xpToAdd = 1;
+                    try
+                    {
+                        // 将指针转换为字符串，直接获取字数
+                        string insertedText = Marshal.PtrToStringAnsi(notification.text);
+                        if (!string.IsNullOrEmpty(insertedText))
+                        {
+                            xpToAdd = Math.Min(insertedText.Length, 15); // 单次最多 15 XP
+                        }
+                    }
+                    catch { }
 
                     HandleActivity(xpToAdd);
                     
