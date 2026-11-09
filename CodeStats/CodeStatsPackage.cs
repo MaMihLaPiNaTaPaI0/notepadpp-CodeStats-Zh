@@ -29,7 +29,7 @@ namespace CodeStats
 
         static ConfigFile _CodeStatsConfigFile;
         public static CodeStats.Forms.SettingsForm _settingsForm;
-        public static CodeStats.Forms.ApiKeyForm _apikeyForm; // should be null if not needed
+        public static CodeStats.Forms.ApiKeyForm _apikeyForm; 
         static string _lastStatusBarDocTypeText;
         static DateTime _lastPulse = DateTime.Now;
         static DateTime _lastActivity = DateTime.Now;
@@ -68,6 +68,16 @@ namespace CodeStats
         private static HttpClient pulseProcessor_client;
         private static HttpClientHandler pulseProcessor_httpClientHandler;
 
+        // =====================================================================
+        // 【修复报错】：自己引入原生的 Windows API，绕过底层库缺少重载的问题
+        // =====================================================================
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, ref int lParam);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+        // =====================================================================
+
         #endregion
 
         internal static void CommandMenuInit()
@@ -90,11 +100,7 @@ namespace CodeStats
                 System.Net.ServicePointManager.SecurityProtocol |= (SecurityProtocolType)12288 | SecurityProtocolType.Tls12 | SecurityProtocolType.Tls11;
             }
 
-            try
-            {
-                Logger.Delete();
-            }
-            catch { }
+            try { Logger.Delete(); } catch { }
 
             Logger.Info(string.Format("Initializing Code::Stats v{0}", Constants.PluginVersion));
 
@@ -113,13 +119,11 @@ namespace CodeStats
                     try
                     {
                         string latestVersionString = Constants.LatestPluginVersion();
-                        Logger.Debug("Latest version of the plugin online is: " + latestVersionString);
                         Version latest = new Version(latestVersionString);
                         Version current = new Version(Constants.PluginVersion);
                         if (current.CompareTo(latest) < 0 && !String.IsNullOrWhiteSpace(latestVersionString))
                         {
-                            Logger.Info("Displaying update available notice");
-                            MessageBox.Show("There is Code::Stats plugin update available!\nDownload it from Plugins Admin or GitHub. If the update is not available in Plugins Admin, you may need to update your Notepad++ version first.\nYour version: " + Constants.PluginVersion + "\nLatest: " + latestVersionString, "Code::Stats");
+                            MessageBox.Show("There is Code::Stats plugin update available!\nDownload it from Plugins Admin or GitHub.", "Code::Stats");
                         }
                     }
                     catch { }
@@ -140,10 +144,7 @@ namespace CodeStats
                 timer.Elapsed += ProcessPulses;
                 timer.AutoReset = false;
 
-                if (Stats)
-                {
-                    ReportStats();
-                }
+                if (Stats) { ReportStats(); }
 
                 Task.Run(() =>
                 {
@@ -157,17 +158,13 @@ namespace CodeStats
                             var pulses = serializer.Deserialize<List<Pulse>>(json);
                             foreach (var pulse in pulses)
                             {
-                                Logger.Info("Restoring dumped pulse: " + serializer.Serialize(pulse));
                                 pulseQueue.Enqueue(pulse);
                             }
                             UpdateStatusbar();
                             File.Delete(path);
                         }
                     }
-                    catch (Exception ex)
-                    {
-                        Logger.Error("Error trying to restore dumped pulses from file!", ex);
-                    }
+                    catch { }
                 });
 
                 Logger.Info(string.Format("Finished initializing Code::Stats v{0}", Constants.PluginVersion));
@@ -182,19 +179,12 @@ namespace CodeStats
         {
             try
             {
-                Assembly _assembly;
-                StreamReader _textStreamReader;
-                Stream _stream;
-                string extensionMappingJson;
+                Assembly _assembly = Assembly.GetExecutingAssembly();
+                Stream _stream = _assembly.GetManifestResourceStream("CodeStats.Resources.extension_mapping.json");
+                StreamReader _textStreamReader = new StreamReader(_stream);
+                string extensionMappingJson = _textStreamReader.ReadToEnd();
                 var serializer = new JavaScriptSerializer();
-
-                _assembly = Assembly.GetExecutingAssembly();
-                _stream = _assembly.GetManifestResourceStream("CodeStats.Resources.extension_mapping.json");
-                _textStreamReader = new StreamReader(_stream);
-                extensionMappingJson = _textStreamReader.ReadToEnd();
                 extensionMapping = serializer.Deserialize<Dictionary<string, string>>(extensionMappingJson);
-
-                Logger.Debug("Loaded local precompiled extension mapping");
 
                 Task.Run(() =>
                 {
@@ -204,39 +194,21 @@ namespace CodeStats
                     {
                         var client = new WebClient { Proxy = CodeStatsPackage.GetProxy() };
                         client.Headers[HttpRequestHeader.UserAgent] = Constants.PluginUserAgent;
-
                         try
                         {
                             extensionMappingJsonNew = client.DownloadString("https://raw.githubusercontent.com/p0358/notepadpp-CodeStats/master/CodeStats/Resources/extension_mapping.json").Trim();
-                            if (!extensionMappingJsonNew.StartsWith("{") || !extensionMappingJson.EndsWith("}"))
-                            {
-                                extensionMappingJsonNew = string.Empty;
-                                Logger.Error("Invalid response when trying to download latest extension mappings, using local ones instead");
-                            }
                         }
-                        catch (Exception ex)
-                        {
-                            extensionMappingJson = string.Empty;
-                            Logger.Error("Exception when trying to download latest extension mappings, using local ones instead", ex);
-                        }
+                        catch { }
                     }
-                    catch
-                    {
-                        extensionMappingJson = string.Empty;
-                    }
+                    catch { }
 
                     if (!String.IsNullOrWhiteSpace(extensionMappingJsonNew) && extensionMappingJsonNew != extensionMappingJson)
                     {
                         extensionMapping = serializer2.Deserialize<Dictionary<string, string>>(extensionMappingJson);
-                        Logger.Debug("Loaded latest extension mapping JSON");
                     }
-                    else Logger.Debug("There are no updates to extension mapping JSON");
                 });
             }
-            catch (Exception ex)
-            {
-                Logger.Error("Error loading extension mappings!", ex);
-            }
+            catch { }
         }
 
         private static void LoadCustomExtensionMapping()
@@ -246,27 +218,14 @@ namespace CodeStats
                 StringBuilder sbConfigFilePath = new StringBuilder(Win32.MAX_PATH);
                 Win32.SendMessage(PluginBase.nppData._nppHandle, (uint)NppMsg.NPPM_GETPLUGINSCONFIGDIR, Win32.MAX_PATH, sbConfigFilePath);
                 string configFilePath = sbConfigFilePath.ToString();
-
                 string customExtensionMappingFilePath = ConfigFile.GetCustomExtensionMappingFilePath();
 
-                StreamReader _textStreamReader;
-                string customExtensionMappingJson;
+                StreamReader _textStreamReader = File.OpenText(customExtensionMappingFilePath);
+                string customExtensionMappingJson = _textStreamReader.ReadToEnd();
                 var serializer = new JavaScriptSerializer();
-
-                _textStreamReader = File.OpenText(customExtensionMappingFilePath);
-                customExtensionMappingJson = _textStreamReader.ReadToEnd();
                 customExtensionMapping = serializer.Deserialize<Dictionary<string, string>>(customExtensionMappingJson);
-
-                Logger.Debug("Loaded custom extension mapping");
             }
-            catch (FileNotFoundException)
-            {
-                Logger.Debug("Custom extension mapping JSON file does not exist");
-            }
-            catch (Exception ex)
-            {
-                Logger.Error("Error loading custom extension mappings!", ex);
-            }
+            catch { }
         }
 
         internal static void SetToolBarIcon()
@@ -296,20 +255,19 @@ namespace CodeStats
                 UpdateStatusbar();
 
                 // 初始化长度基准
-                int which = -1;
-                Win32.SendMessage(PluginBase.nppData._nppHandle, (uint)NppMsg.NPPM_GETCURRENTSCINTILLA, 0, ref which);
+                int which = 0;
+                SendMessage(PluginBase.nppData._nppHandle, (uint)NppMsg.NPPM_GETCURRENTSCINTILLA, IntPtr.Zero, ref which);
                 IntPtr curScintilla = (which == 0) ? PluginBase.nppData._scintillaMainHandle : PluginBase.nppData._scintillaSecondHandle;
-                // 使用 IntPtr.Zero 修复编译报错
-                _lastDocLength = Win32.SendMessage(curScintilla, 2006 /* SCI_GETLENGTH */, IntPtr.Zero, IntPtr.Zero).ToInt32();
+                _lastDocLength = SendMessage(curScintilla, 2006 /* SCI_GETLENGTH */, IntPtr.Zero, IntPtr.Zero).ToInt32();
             }
 
             // 切换标签时重新获取基准
             if (notification.Header.Code == (uint)NppMsg.NPPN_BUFFERACTIVATED)
             {
-                int which = -1;
-                Win32.SendMessage(PluginBase.nppData._nppHandle, (uint)NppMsg.NPPM_GETCURRENTSCINTILLA, 0, ref which);
+                int which = 0;
+                SendMessage(PluginBase.nppData._nppHandle, (uint)NppMsg.NPPM_GETCURRENTSCINTILLA, IntPtr.Zero, ref which);
                 IntPtr curScintilla = (which == 0) ? PluginBase.nppData._scintillaMainHandle : PluginBase.nppData._scintillaSecondHandle;
-                _lastDocLength = Win32.SendMessage(curScintilla, 2006 /* SCI_GETLENGTH */, IntPtr.Zero, IntPtr.Zero).ToInt32();
+                _lastDocLength = SendMessage(curScintilla, 2006 /* SCI_GETLENGTH */, IntPtr.Zero, IntPtr.Zero).ToInt32();
             }
 
             if (notification.Header.Code == (uint)SciMsg.SCN_CHARADDED)
@@ -323,12 +281,11 @@ namespace CodeStats
                 bool isInsert = (notification.ModificationType & (int)SciMsg.SC_MOD_INSERTTEXT) != 0;
                 bool isUser = (notification.ModificationType & (int)SciMsg.SC_PERFORMED_USER) != 0;
 
-                int which = -1;
-                Win32.SendMessage(PluginBase.nppData._nppHandle, (uint)NppMsg.NPPM_GETCURRENTSCINTILLA, 0, ref which);
+                int which = 0;
+                SendMessage(PluginBase.nppData._nppHandle, (uint)NppMsg.NPPM_GETCURRENTSCINTILLA, IntPtr.Zero, ref which);
                 IntPtr curScintilla = (which == 0) ? PluginBase.nppData._scintillaMainHandle : PluginBase.nppData._scintillaSecondHandle;
                 
-                // 修复编译报错的写法
-                int currentLength = Win32.SendMessage(curScintilla, 2006 /* SCI_GETLENGTH */, IntPtr.Zero, IntPtr.Zero).ToInt32();
+                int currentLength = SendMessage(curScintilla, 2006 /* SCI_GETLENGTH */, IntPtr.Zero, IntPtr.Zero).ToInt32();
 
                 if (isInsert && isUser)
                 {
@@ -440,9 +397,8 @@ namespace CodeStats
                     var jsonSerializer = new JavaScriptSerializer();
 
                     string URL;
-                    bool usesCustomEndpoint = false;
                     if (String.IsNullOrWhiteSpace(ApiUrl)) { URL = Constants.ApiEndpoint; }
-                    else { URL = ApiUrl; usesCustomEndpoint = true; }
+                    else { URL = ApiUrl; }
                     
                     if (!URL.EndsWith("my/pulses")) URL += "my/pulses";
 
@@ -495,7 +451,7 @@ namespace CodeStats
                                     }
                                 }
                             }
-                            catch (Exception ex) { error = true; }
+                            catch (Exception) { error = true; }
 
                             if (error)
                             {
@@ -558,7 +514,6 @@ namespace CodeStats
             if (currentFile != null) extension = Path.GetExtension(currentFile).TrimStart('.');
 
             bool found = false;
-            var foundDetectionMethod = Constants.DetectionType.EXTENSION_MAPPING;
             string language = "";
 
             foreach (var detectionMethod in DetectionOrder)
@@ -645,11 +600,7 @@ namespace CodeStats
                         }
                         break;
                 }
-                if (found)
-                {
-                    foundDetectionMethod = detectionMethod;
-                    break;
-                }
+                if (found) break;
             }
 
             if (!found || String.IsNullOrWhiteSpace(language)) language = "Plain text";
