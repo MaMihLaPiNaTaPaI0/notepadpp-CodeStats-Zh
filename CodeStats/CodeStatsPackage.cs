@@ -55,6 +55,9 @@ namespace CodeStats
 
         static bool nppStarted = false;
 
+        // 记录上一次文档的总长度，用于计算差分（核心修复）
+        private static int _lastDocLength = -1;
+
         static Dictionary<string, string> extensionMapping;
         static Dictionary<string, string> customExtensionMapping;
 
@@ -349,30 +352,29 @@ namespace CodeStats
                 Logger.Debug("[notification] NPPN_READY");
                 nppStarted = true;
                 UpdateStatusbar();
+
+                // 初始化长度基准
+                int which = -1;
+                Win32.SendMessage(PluginBase.nppData._nppHandle, (uint)NppMsg.NPPM_GETCURRENTSCINTILLA, 0, ref which);
+                IntPtr curScintilla = (which == 0) ? PluginBase.nppData._scintillaMainHandle : PluginBase.nppData._scintillaSecondHandle;
+                _lastDocLength = (int)Win32.SendMessage(curScintilla, 2006 /* SCI_GETLENGTH */, 0, 0);
             }
+
+            // 当切换标签页时，重新获取基准，防止大段文字突变
+            if (notification.Header.Code == (uint)NppMsg.NPPN_BUFFERACTIVATED)
+            {
+                Logger.Debug("[notification] NPPN_BUFFERACTIVATED");
+                int which = -1;
+                Win32.SendMessage(PluginBase.nppData._nppHandle, (uint)NppMsg.NPPM_GETCURRENTSCINTILLA, 0, ref which);
+                IntPtr curScintilla = (which == 0) ? PluginBase.nppData._scintillaMainHandle : PluginBase.nppData._scintillaSecondHandle;
+                _lastDocLength = (int)Win32.SendMessage(curScintilla, 2006 /* SCI_GETLENGTH */, 0, 0);
+            }
+
             if (nppStarted && (notification.Header.Code == (uint)SciMsg.SCN_MODIFIED || notification.Header.Code == (uint)NppMsg.NPPN_TBMODIFICATION))
             {
                 //Logger.Debug("[notification] SCN_MODIFIED #1");
                 //UpdateStatusbar();
             }
-
-            /*if (notification.Header.Code == (uint)NppMsg.NPPN_FILESAVED) // It does count as 1 XP in Visual Studio Code, though not sure if intended!
-            {
-                HandleActivity(GetCurrentFile(), true);
-            }*/
-
-            // (notification.ModificationType & ((int)SciMsg.SC_MOD_INSERTTEXT | (int)SciMsg.SC_MOD_DELETETEXT) == ((int)SciMsg.SC_MOD_INSERTTEXT | (int)SciMsg.SC_MOD_DELETETEXT))
-
-            /*if (  notification.Header.Code == (uint)SciMsg.SCN_MODIFIED &&
-                ( ((notification.ModificationType & (int)SciMsg.SC_MOD_INSERTTEXT) == (int)SciMsg.SC_MOD_INSERTTEXT)
-                  || ((notification.ModificationType & (int)SciMsg.SC_MOD_DELETETEXT) == (int)SciMsg.SC_MOD_DELETETEXT) )
-                && ((notification.ModificationType & (int)SciMsg.SC_PERFORMED_USER) == (int)SciMsg.SC_PERFORMED_USER)  )
-            {
-                Logger.Info("1. File: " + GetCurrentFile() + ", char: " + notification.character + ", nppstarted: " + nppStarted.ToString() + ", flags: " + notification.ModificationType.ToString("X"));
-            }*/ // Too unstable - 0x2012 (ModificationType) might be used for deleting of selected text, but it's still nowhere near good
-
-            // TODO: Could use SCN_MODIFIED perhaps, but check for file status with NPPM_READY (don't count before this one), 
-            // NPPM_FILE_BEFORE_LOAD, (NPPM_FILE_LOAD_FAILED), NPPM_FILE_OPENED (then start counting?), NPPM_FILEBEFORECLOSE [http://docs.notepad-plus-plus.org/index.php/Messages_And_Notifications]
 
             if (notification.Header.Code == (uint)SciMsg.SCN_CHARADDED) // our best bet
             {
@@ -380,33 +382,40 @@ namespace CodeStats
                 HandleActivity();
                 if (Debug) Logger.Debug("SCN_CHARADDED - File: " + GetCurrentFile() + ", char: " + (char)notification.character + " (" + notification.character + "), lang: " + GetCurrentLanguage());
             }
-            // ================== 【新增：支持中文输入统计】 ==================
+
+            // ================== 【新增：支持中文输入统计（SCI_GETLENGTH 差分法）】 ==================
             if (nppStarted && notification.Header.Code == (uint)SciMsg.SCN_MODIFIED)
             {
                 bool isInsert = (notification.ModificationType & (int)SciMsg.SC_MOD_INSERTTEXT) != 0;
                 bool isUser = (notification.ModificationType & (int)SciMsg.SC_PERFORMED_USER) != 0;
 
-                // 移除了不存在的 length 字段，改为读取文本指针
-                if (isInsert && isUser && notification.text != IntPtr.Zero)
-                {
-                    int xpToAdd = 1;
-                    try
-                    {
-                        // 将指针转换为字符串，直接获取字数
-                        string insertedText = Marshal.PtrToStringAnsi(notification.text);
-                        if (!string.IsNullOrEmpty(insertedText))
-                        {
-                            xpToAdd = Math.Min(insertedText.Length, 15); // 单次最多 15 XP
-                        }
-                    }
-                    catch { }
+                int which = -1;
+                Win32.SendMessage(PluginBase.nppData._nppHandle, (uint)NppMsg.NPPM_GETCURRENTSCINTILLA, 0, ref which);
+                IntPtr curScintilla = (which == 0) ? PluginBase.nppData._scintillaMainHandle : PluginBase.nppData._scintillaSecondHandle;
+                int currentLength = (int)Win32.SendMessage(curScintilla, 2006 /* SCI_GETLENGTH */, 0, 0);
 
-                    HandleActivity(xpToAdd);
-                    
-                    if (Debug) Logger.Debug("SC_MOD_INSERTTEXT - Added XP: " + xpToAdd);
+                if (isInsert && isUser)
+                {
+                    if (_lastDocLength != -1 && currentLength > _lastDocLength)
+                    {
+                        int delta = currentLength - _lastDocLength;
+                        // UTF-8 编码下，英文字符占 1 字节，中文字符占 3 字节
+                        // 向上取整，保证英文(1/3)算作1点，中文(3/3)算作1点
+                        int xpToAdd = (int)Math.Ceiling((double)delta / 3.0);
+                        
+                        // 防刷分：单次最多 15 XP
+                        if (xpToAdd > 15) xpToAdd = 15;
+
+                        HandleActivity(xpToAdd);
+                        
+                        if (Debug) Logger.Debug("SC_MOD_INSERTTEXT - Added XP: " + xpToAdd);
+                    }
                 }
+                
+                // 刷新基准，无论插入还是删除，保证下一次计算正确
+                _lastDocLength = currentLength;
             }
-            // ================================================================
+            // ===========================================================================================
 
             int SC_PERFORMED_USER_AND_SC_MOD_DELETETEXT = (int)SciMsg.SC_PERFORMED_USER | (int)SciMsg.SC_MOD_DELETETEXT;
             if (nppStarted && notification.Header.Code == (uint)SciMsg.SCN_MODIFIED && ((notification.ModificationType & SC_PERFORMED_USER_AND_SC_MOD_DELETETEXT) == SC_PERFORMED_USER_AND_SC_MOD_DELETETEXT))
