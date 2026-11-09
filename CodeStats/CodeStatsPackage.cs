@@ -380,6 +380,26 @@ namespace CodeStats
                 HandleActivity();
                 if (Debug) Logger.Debug("SCN_CHARADDED - File: " + GetCurrentFile() + ", char: " + (char)notification.character + " (" + notification.character + "), lang: " + GetCurrentLanguage());
             }
+            // ================== 【新增：支持中文输入统计】 ==================
+            if (nppStarted && notification.Header.Code == (uint)SciMsg.SCN_MODIFIED)
+            {
+                bool isInsert = (notification.ModificationType & (int)SciMsg.SC_MOD_INSERTTEXT) != 0;
+                bool isUser = (notification.ModificationType & (int)SciMsg.SC_PERFORMED_USER) != 0;
+
+                if (isInsert && isUser && notification.length > 0)
+                {
+                    // 按照 UTF-8 字节数计算，一个汉字 3 个字节，向上取整
+                    int xpToAdd = (int)Math.Ceiling((double)notification.length / 3);
+                    
+                    // 防粘贴刷分限制：单次最多计算 15 XP
+                    if (xpToAdd > 15) xpToAdd = 15;
+
+                    HandleActivity(xpToAdd);
+                    
+                    if (Debug) Logger.Debug("SC_MOD_INSERTTEXT - Added XP: " + xpToAdd);
+                }
+            }
+            // ================================================================
 
             int SC_PERFORMED_USER_AND_SC_MOD_DELETETEXT = (int)SciMsg.SC_PERFORMED_USER | (int)SciMsg.SC_MOD_DELETETEXT;
             if (nppStarted && notification.Header.Code == (uint)SciMsg.SCN_MODIFIED && ((notification.ModificationType & SC_PERFORMED_USER_AND_SC_MOD_DELETETEXT) == SC_PERFORMED_USER_AND_SC_MOD_DELETETEXT))
@@ -418,16 +438,16 @@ namespace CodeStats
             _lastStatusBarDocTypeText = newStatusBarDocTypeText;
         }
 
-        public static void HandleActivity()
+        public static void HandleActivity(int xpAmount = 1)
         {
             if (!nppStarted) return;
 
-            currentCount += 1;
+            currentCount += xpAmount;
 
             UpdateStatusbar();
 
             currentLanguage = GetCurrentLanguage();
-            currentPulse.addXpForLanguage(currentLanguage, 1);
+            currentPulse.addXpForLanguage(currentLanguage, xpAmount);
 
             /*var jsonSerializer = new System.Web.Script.Serialization.JavaScriptSerializer();
             string json = jsonSerializer.Serialize(currentPulse);
