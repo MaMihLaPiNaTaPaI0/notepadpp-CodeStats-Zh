@@ -54,7 +54,7 @@ namespace CodeStats
 
         static bool nppStarted = false;
 
-        // 记录上一次文档的总长度
+        // 记录上一次文档的总长度，用于计算差分
         private static int _lastDocLength = -1;
 
         static Dictionary<string, string> extensionMapping;
@@ -217,7 +217,6 @@ namespace CodeStats
             {
                 UpdateStatusbar();
             }
-            
             if (notification.Header.Code == (uint)NppMsg.NPPN_READY)
             {
                 nppStarted = true;
@@ -230,58 +229,73 @@ namespace CodeStats
                 UpdateBaseLength();
             }
 
-            // 【核心终极方案】：不管是单字符输入还是中文插入，只要发生文本增加，就计算差分！
-            if (notification.Header.Code == (uint)SciMsg.SCN_CHARADDED || notification.Header.Code == (uint)SciMsg.SCN_MODIFIED)
+            // 1. 英文/单字符输入事件：稳定触发，每次给 10 点
+            if (notification.Header.Code == (uint)SciMsg.SCN_CHARADDED)
             {
-                // 保底：如果没触发 READY 信号，只要有改动就当做已启动
-                if (!nppStarted)
-                {
-                    nppStarted = true;
-                    UpdateBaseLength();
-                }
+                HandleActivity(10);
+            }
 
-                bool isInsert = (notification.Header.Code == (uint)SciMsg.SCN_CHARADDED) || 
-                                ((notification.ModificationType & (int)SciMsg.SC_MOD_INSERTTEXT) != 0);
+            // 2. 中文/多字符输入事件：只要文本变长就计算长度差
+            if (nppStarted && notification.Header.Code == (uint)SciMsg.SCN_MODIFIED)
+            {
+                bool isInsert = (notification.ModificationType & (int)SciMsg.SC_MOD_INSERTTEXT) != 0;
                 
-                bool isDelete = (notification.Header.Code == (uint)SciMsg.SCN_MODIFIED) && 
-                                ((notification.ModificationType & (int)SciMsg.SC_MOD_DELETETEXT) != 0);
+                if (isInsert)
+                {
+                    int currentLength = GetCurrentDocLength();
 
+                    // 安全校验：如果之前没获取到基准，现在获取
+                    if (_lastDocLength == -1)
+                    {
+                        _lastDocLength = currentLength;
+                    }
+                    else if (currentLength > _lastDocLength)
+                    {
+                        int delta = currentLength - _lastDocLength;
+                        
+                        // UTF-8 汉字占 3 字节，英文占 1 字节。向上取整算出字数。
+                        int chars = (int)Math.Ceiling((double)delta / 3.0);
+                        
+                        // 每个字符 10 点
+                        int xpToAdd = chars * 10;
+
+                        // 单次防大段粘贴上限 300 XP
+                        if (xpToAdd > 300) xpToAdd = 300;
+
+                        HandleActivity(xpToAdd);
+                    }
+                    // 记录最新的长度基准
+                    _lastDocLength = currentLength;
+                }
+            }
+
+            // 3. 删除文本操作：每次给 1 点
+            int SC_PERFORMED_USER_AND_SC_MOD_DELETETEXT = (int)SciMsg.SC_PERFORMED_USER | (int)SciMsg.SC_MOD_DELETETEXT;
+            if (nppStarted && notification.Header.Code == (uint)SciMsg.SCN_MODIFIED && ((notification.ModificationType & SC_PERFORMED_USER_AND_SC_MOD_DELETETEXT) == SC_PERFORMED_USER_AND_SC_MOD_DELETETEXT))
+            {
+                HandleActivity(1);
+            }
+        }
+
+        // 抽取一个获取长度的安全函数
+        private static int GetCurrentDocLength()
+        {
+            try
+            {
                 int which = 0;
                 SendMessage(PluginBase.nppData._nppHandle, (uint)NppMsg.NPPM_GETCURRENTSCINTILLA, IntPtr.Zero, ref which);
                 IntPtr curScintilla = (which == 0) ? PluginBase.nppData._scintillaMainHandle : PluginBase.nppData._scintillaSecondHandle;
-                
-                int currentLength = SendMessage(curScintilla, 2006, IntPtr.Zero, IntPtr.Zero).ToInt32();
-
-                if (isInsert && _lastDocLength != -1 && currentLength > _lastDocLength)
-                {
-                    int delta = currentLength - _lastDocLength;
-                    // 1个汉字占3字节，算出大概字数（向上取整）
-                    int chars = (int)Math.Ceiling((double)delta / 3.0);
-                    
-                    // 每个字符 = 10 经验
-                    int xpToAdd = chars * 10;
-                    
-                    // 单次防粘贴上限：最多 300 XP
-                    if (xpToAdd > 300) xpToAdd = 300;
-
-                    HandleActivity(xpToAdd);
-                }
-                else if (isDelete && _lastDocLength != -1 && currentLength < _lastDocLength)
-                {
-                    // 删除算 1 分
-                    HandleActivity(1);
-                }
-
-                _lastDocLength = currentLength;
+                return SendMessage(curScintilla, 2006, IntPtr.Zero, IntPtr.Zero).ToInt32();
+            }
+            catch
+            {
+                return 0;
             }
         }
 
         private static void UpdateBaseLength()
         {
-            int which = 0;
-            SendMessage(PluginBase.nppData._nppHandle, (uint)NppMsg.NPPM_GETCURRENTSCINTILLA, IntPtr.Zero, ref which);
-            IntPtr curScintilla = (which == 0) ? PluginBase.nppData._scintillaMainHandle : PluginBase.nppData._scintillaSecondHandle;
-            _lastDocLength = SendMessage(curScintilla, 2006, IntPtr.Zero, IntPtr.Zero).ToInt32();
+            _lastDocLength = GetCurrentDocLength();
         }
 
         public static void UpdateStatusbar()
