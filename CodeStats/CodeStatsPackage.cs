@@ -54,7 +54,7 @@ namespace CodeStats
 
         static bool nppStarted = false;
 
-        // 记录上一次文档的总长度，用于计算差分
+        // 记录上一次文档的总长度
         private static int _lastDocLength = -1;
 
         static Dictionary<string, string> extensionMapping;
@@ -104,25 +104,9 @@ namespace CodeStats
                 currentPulse = new Pulse();
                 _CodeStatsConfigFile = new ConfigFile();
                 GetSettings(true);
-                Logger.Debug("Loaded config");
 
                 LoadExtensionMapping();
                 LoadCustomExtensionMapping();
-
-                Task.Run(() =>
-                {
-                    try
-                    {
-                        string latestVersionString = Constants.LatestPluginVersion();
-                        Version latest = new Version(latestVersionString);
-                        Version current = new Version(Constants.PluginVersion);
-                        if (current.CompareTo(latest) < 0 && !String.IsNullOrWhiteSpace(latestVersionString))
-                        {
-                            MessageBox.Show("There is Code::Stats plugin update available!\nDownload it from Plugins Admin or GitHub.", "Code::Stats");
-                        }
-                    }
-                    catch { }
-                });
 
                 if (string.IsNullOrEmpty(ApiKey))
                 {
@@ -151,23 +135,15 @@ namespace CodeStats
                             var json = File.ReadAllText(path);
                             var serializer = new JavaScriptSerializer();
                             var pulses = serializer.Deserialize<List<Pulse>>(json);
-                            foreach (var pulse in pulses)
-                            {
-                                pulseQueue.Enqueue(pulse);
-                            }
+                            foreach (var pulse in pulses) { pulseQueue.Enqueue(pulse); }
                             UpdateStatusbar();
                             File.Delete(path);
                         }
                     }
                     catch { }
                 });
-
-                Logger.Info(string.Format("Finished initializing Code::Stats v{0}", Constants.PluginVersion));
             }
-            catch (Exception ex)
-            {
-                Logger.Error("Error Initializing Code::Stats", ex);
-            }
+            catch (Exception ex) { Logger.Error("Error Initializing Code::Stats", ex); }
         }
 
         private static void LoadExtensionMapping()
@@ -189,10 +165,7 @@ namespace CodeStats
                     {
                         var client = new WebClient { Proxy = CodeStatsPackage.GetProxy() };
                         client.Headers[HttpRequestHeader.UserAgent] = Constants.PluginUserAgent;
-                        try
-                        {
-                            extensionMappingJsonNew = client.DownloadString("https://raw.githubusercontent.com/p0358/notepadpp-CodeStats/master/CodeStats/Resources/extension_mapping.json").Trim();
-                        }
+                        try { extensionMappingJsonNew = client.DownloadString("https://raw.githubusercontent.com/p0358/notepadpp-CodeStats/master/CodeStats/Resources/extension_mapping.json").Trim(); }
                         catch { }
                     }
                     catch { }
@@ -252,7 +225,7 @@ namespace CodeStats
                 int which = 0;
                 SendMessage(PluginBase.nppData._nppHandle, (uint)NppMsg.NPPM_GETCURRENTSCINTILLA, IntPtr.Zero, ref which);
                 IntPtr curScintilla = (which == 0) ? PluginBase.nppData._scintillaMainHandle : PluginBase.nppData._scintillaSecondHandle;
-                _lastDocLength = SendMessage(curScintilla, 2006 /* SCI_GETLENGTH */, IntPtr.Zero, IntPtr.Zero).ToInt32();
+                _lastDocLength = SendMessage(curScintilla, 2006, IntPtr.Zero, IntPtr.Zero).ToInt32();
             }
 
             if (notification.Header.Code == (uint)NppMsg.NPPN_BUFFERACTIVATED)
@@ -260,53 +233,50 @@ namespace CodeStats
                 int which = 0;
                 SendMessage(PluginBase.nppData._nppHandle, (uint)NppMsg.NPPM_GETCURRENTSCINTILLA, IntPtr.Zero, ref which);
                 IntPtr curScintilla = (which == 0) ? PluginBase.nppData._scintillaMainHandle : PluginBase.nppData._scintillaSecondHandle;
-                _lastDocLength = SendMessage(curScintilla, 2006 /* SCI_GETLENGTH */, IntPtr.Zero, IntPtr.Zero).ToInt32();
+                _lastDocLength = SendMessage(curScintilla, 2006, IntPtr.Zero, IntPtr.Zero).ToInt32();
             }
 
-            if (notification.Header.Code == (uint)SciMsg.SCN_CHARADDED)
-            {
-                HandleActivity();
-            }
+            // 【核心霸道修改】：彻底废掉原有的按单键加 1 分的逻辑
+            // if (notification.Header.Code == (uint)SciMsg.SCN_CHARADDED) { HandleActivity(); }
 
-            // ================== 【核心修改：支持中文且按 10 XP/字符 计算】 ==================
             if (nppStarted && notification.Header.Code == (uint)SciMsg.SCN_MODIFIED)
             {
-                // 只要发生文本插入就处理，不再强制判断 isUser（防止输入法上屏被拦截）
                 bool isInsert = (notification.ModificationType & (int)SciMsg.SC_MOD_INSERTTEXT) != 0;
 
                 int which = 0;
                 SendMessage(PluginBase.nppData._nppHandle, (uint)NppMsg.NPPM_GETCURRENTSCINTILLA, IntPtr.Zero, ref which);
                 IntPtr curScintilla = (which == 0) ? PluginBase.nppData._scintillaMainHandle : PluginBase.nppData._scintillaSecondHandle;
                 
-                int currentLength = SendMessage(curScintilla, 2006 /* SCI_GETLENGTH */, IntPtr.Zero, IntPtr.Zero).ToInt32();
+                int currentLength = SendMessage(curScintilla, 2006, IntPtr.Zero, IntPtr.Zero).ToInt32();
 
                 if (isInsert)
                 {
-                    if (_lastDocLength != -1 && currentLength > _lastDocLength)
+                    if (_lastDocLength == -1) _lastDocLength = currentLength; // 安全初始化
+
+                    if (currentLength > _lastDocLength)
                     {
                         int delta = currentLength - _lastDocLength;
                         
-                        // 1个汉字=3字节，除以3算出大概的字符数（向上取整）
+                        // 1 个汉字=3 字节，除以 3 算出字符数
                         int chars = (int)Math.Ceiling((double)delta / 3.0);
                         
-                        // 核心诉求：每个字符 = 10 经验
+                        // 【核心需求】：1 个字符 = 10 点经验
                         int xpToAdd = chars * 10;
                         
-                        // 防粘贴刷分上限：单次最多给 300 XP（也就是连续粘贴30个汉字以内都算，够意思了）
+                        // 单次最高 300（防止大段粘贴刷分）
                         if (xpToAdd > 300) xpToAdd = 300;
 
                         HandleActivity(xpToAdd);
                     }
                 }
-                // 无论插入还是删除，都要更新基准，防止错位
                 _lastDocLength = currentLength;
             }
-            // ===================================================================================
 
+            // 删除操作（退格键）保留加 1 分的逻辑
             int SC_PERFORMED_USER_AND_SC_MOD_DELETETEXT = (int)SciMsg.SC_PERFORMED_USER | (int)SciMsg.SC_MOD_DELETETEXT;
             if (nppStarted && notification.Header.Code == (uint)SciMsg.SCN_MODIFIED && ((notification.ModificationType & SC_PERFORMED_USER_AND_SC_MOD_DELETETEXT) == SC_PERFORMED_USER_AND_SC_MOD_DELETETEXT))
             {
-                HandleActivity();
+                HandleActivity(1);
             }
         }
 
@@ -380,11 +350,7 @@ namespace CodeStats
             {
                 if (pulseQueue != null && ((currentPulse != null && !currentPulse.isEmpty()) || !pulseQueue.IsEmpty) && EnoughTimePassed(DateTime.Now))
                 {
-                    if (String.IsNullOrWhiteSpace(ApiKey))
-                    {
-                        Logger.Warning("No API token - cannot pulse!");
-                        return;
-                    }
+                    if (String.IsNullOrWhiteSpace(ApiKey)) return;
 
                     if (proxyChangePending)
                     {
@@ -395,10 +361,7 @@ namespace CodeStats
                     }
                     var jsonSerializer = new JavaScriptSerializer();
 
-                    string URL;
-                    if (String.IsNullOrWhiteSpace(ApiUrl)) { URL = Constants.ApiEndpoint; }
-                    else { URL = ApiUrl; }
-                    
+                    string URL = String.IsNullOrWhiteSpace(ApiUrl) ? Constants.ApiEndpoint : ApiUrl;
                     if (!URL.EndsWith("my/pulses")) URL += "my/pulses";
 
                     Pulse result;
@@ -415,48 +378,17 @@ namespace CodeStats
                                 {
                                     Method = HttpMethod.Post,
                                     RequestUri = new Uri(URL),
-                                    Headers = {
-                                        { "User-Agent", Constants.PluginUserAgent },
-                                        { "Accept", "*/*" },
-                                        { "X-API-Token", ApiKey }
-                                    },
+                                    Headers = { { "User-Agent", Constants.PluginUserAgent }, { "Accept", "*/*" }, { "X-API-Token", ApiKey } },
                                     Content = new StringContent(json = jsonSerializer.Serialize(result), Encoding.UTF8, "application/json")
                                 };
 
                                 response = await pulseProcessor_client.SendAsync(httpRequestMessage, tokenSource.Token);
                                 response.EnsureSuccessStatusCode();
-                                string JsonResult = await response.Content.ReadAsStringAsync();
                                 _lastPulse = DateTime.Now;
-                                if (!JsonResult.Contains(@"""ok""") && !JsonResult.Contains(@"success"))
-                                {
-                                    error = true;
-                                }
                             }
-                            catch (TaskCanceledException)
-                            {
-                                pulseQueue.Enqueue(result); 
-                                return;
-                            }
-                            catch (HttpRequestException ex)
-                            {
-                                error = true;
-                                if (response != null && (int)response.StatusCode == 403)
-                                {
-                                    if (!_hasAlreadyShownInvalidApiTokenMessage)
-                                    {
-                                        _hasAlreadyShownInvalidApiTokenMessage = true;
-                                        MessageBox.Show("Could not pulse. Please make sure you entered a valid API token.", "Code::Stats – error 403", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                                        PromptApiKey();
-                                    }
-                                }
-                            }
-                            catch (Exception) { error = true; }
+                            catch { error = true; }
 
-                            if (error)
-                            {
-                                pulseQueue.Enqueue(result); 
-                                return;
-                            }
+                            if (error) { pulseQueue.Enqueue(result); return; }
                         }
                         tokenSource.Token.ThrowIfCancellationRequested();
                     }
@@ -467,9 +399,7 @@ namespace CodeStats
         public static string GetCurrentFile()
         {
             var currentFile = new StringBuilder(Win32.MAX_PATH);
-            return
-                (int)Win32.SendMessage(PluginBase.nppData._nppHandle, (uint)NppMsg.NPPM_GETFULLCURRENTPATH, 0, currentFile) != -1
-                    ? currentFile.ToString() : null;
+            return (int)Win32.SendMessage(PluginBase.nppData._nppHandle, (uint)NppMsg.NPPM_GETFULLCURRENTPATH, 0, currentFile) != -1 ? currentFile.ToString() : null;
         }
 
         public static LangType GetCurrentLangType()
@@ -479,38 +409,27 @@ namespace CodeStats
             return docType;
         }
 
-        public static string GetCurrentLangName()
-        {
-            return GetLangName(GetCurrentLangType());
-        }
+        public static string GetCurrentLangName() { return GetLangName(GetCurrentLangType()); }
 
         public static string GetLangName(LangType langType) 
         {
             var languageName = new StringBuilder(Win32.MAX_PATH);
-            return
-                (int)Win32.SendMessage(PluginBase.nppData._nppHandle, (uint)NppMsg.NPPM_GETLANGUAGENAME, (IntPtr)langType, languageName) != -1
-                    ? languageName.ToString() : null;
+            return (int)Win32.SendMessage(PluginBase.nppData._nppHandle, (uint)NppMsg.NPPM_GETLANGUAGENAME, (IntPtr)langType, languageName) != -1 ? languageName.ToString() : null;
         }
 
-        public static string GetCurrentLangDesc()
-        {
-            return GetLangDesc(GetCurrentLangType());
-        }
+        public static string GetCurrentLangDesc() { return GetLangDesc(GetCurrentLangType()); }
 
         public static string GetLangDesc(LangType langType) 
         {
             var languageDesc = new StringBuilder(Win32.MAX_PATH);
-            return
-                (int)Win32.SendMessage(PluginBase.nppData._nppHandle, (uint)NppMsg.NPPM_GETLANGUAGEDESC, (IntPtr)langType, languageDesc) != -1
-                    ? languageDesc.ToString() : null;
+            return (int)Win32.SendMessage(PluginBase.nppData._nppHandle, (uint)NppMsg.NPPM_GETLANGUAGEDESC, (IntPtr)langType, languageDesc) != -1 ? languageDesc.ToString() : null;
         }
 
         public static string GetCurrentLanguage() 
         {
             LangType langType = GetCurrentLangType();
             string currentFile = GetCurrentFile();
-            string extension = "";
-            if (currentFile != null) extension = Path.GetExtension(currentFile).TrimStart('.');
+            string extension = currentFile != null ? Path.GetExtension(currentFile).TrimStart('.') : "";
 
             bool found = false;
             string language = "";
@@ -522,80 +441,32 @@ namespace CodeStats
                     case Constants.DetectionType.CUSTOM_MAPPING:
                         if (!String.IsNullOrWhiteSpace(extension))
                         {
-                            try { language = customExtensionMapping[extension]; found = true; }
-                            catch (KeyNotFoundException) { found = false; }
+                            try { language = customExtensionMapping[extension]; found = true; } catch { found = false; }
                         }
                         break;
-                    
                     case Constants.DetectionType.EXTENSION_MAPPING:
                         if (!String.IsNullOrWhiteSpace(extension))
                         {
-                            try { language = extensionMapping[extension]; found = true; }
-                            catch (KeyNotFoundException) { found = false; }
+                            try { language = extensionMapping[extension]; found = true; } catch { found = false; }
                         }
                         break;
-
                     case Constants.DetectionType.LEXER_LANGUAGE:
                         found = true; 
                         switch (langType)
                         {
-                            case LangType.L_ADA: language = "Ada"; break;
-                            case LangType.L_ASM: language = "Assembler"; break;
-                            case LangType.L_ASP: language = "ASP"; break;
-                            case LangType.L_AU3: language = "AutoIt"; break;
-                            case LangType.L_BASH: language = "Shell Script"; break;
-                            case LangType.L_BATCH: language = "Batch"; break;
                             case LangType.L_C: language = "C"; break;
-                            case LangType.L_CAML: language = "Caml"; break;
-                            case LangType.L_CMAKE: language = "CMake"; break;
-                            case LangType.L_COBOL: language = "COBOL"; break;
-                            case LangType.L_COFFEESCRIPT: language = "CoffeeScript"; break;
                             case LangType.L_CPP: language = "C++"; break;
                             case LangType.L_CS: language = "C#"; break;
                             case LangType.L_CSS: language = "CSS"; break;
-                            case LangType.L_D: language = "D"; break;
-                            case LangType.L_DIFF: language = "Diff"; break;
-                            case LangType.L_FLASH: language = "Flash"; break;
-                            case LangType.L_FORTRAN: language = "Fortran"; break;
-                            case LangType.L_FORTRAN_77: language = "Fortran"; break;
-                            case LangType.L_GUI4CLI: language = "Gui4Cli"; break;
-                            case LangType.L_HASKELL: language = "Haskell"; break;
                             case LangType.L_HTML: language = "HTML"; break;
-                            case LangType.L_INI: language = "Ini"; break;
-                            case LangType.L_INNO: language = "INNO"; break;
                             case LangType.L_JAVA: language = "Java"; break;
                             case LangType.L_JAVASCRIPT: language = "JavaScript"; break;
-                            case LangType.L_JS: language = "JavaScript"; break;
                             case LangType.L_JSON: language = "JSON"; break;
-                            case LangType.L_JSP: language = "JSP"; break;
-                            case LangType.L_KIX: language = "KIXtart"; break;
-                            case LangType.L_LISP: language = "LISP"; break;
-                            case LangType.L_LUA: language = "Lua"; break;
-                            case LangType.L_MAKEFILE: language = "Makefile"; break;
-                            case LangType.L_MATLAB: language = "Matlab"; break;
-                            case LangType.L_NSIS: language = "NSIS"; break;
-                            case LangType.L_OBJC: language = "Objective-C"; break;
-                            case LangType.L_PASCAL: language = "Pascal"; break;
-                            case LangType.L_PERL: language = "Perl"; break;
-                            case LangType.L_PHP: language = "PHP"; break;
-                            case LangType.L_POWERSHELL: language = "PowerShell"; break;
-                            case LangType.L_PROPS: language = "Properties"; break;
-                            case LangType.L_PS: language = "PostScript"; break;
                             case LangType.L_PYTHON: language = "Python"; break;
-                            case LangType.L_R: language = "R"; break;
-                            case LangType.L_RC: language = "Resource"; break;
-                            case LangType.L_RUBY: language = "Ruby"; break;
-                            case LangType.L_SCHEME: language = "Scheme"; break;
-                            case LangType.L_SMALLTALK: language = "Smalltalk"; break;
                             case LangType.L_SQL: language = "SQL"; break;
-                            case LangType.L_TCL: language = "TCL"; break;
-                            case LangType.L_TEX: language = "TeX"; break;
-                            case LangType.L_VB: language = "Visual Basic"; break;
-                            case LangType.L_VERILOG: language = "Verilog"; break;
-                            case LangType.L_VHDL: language = "VHDL"; break;
                             case LangType.L_XML: language = "XML"; break;
                             case LangType.L_YAML: language = "YAML"; break;
-                            default: found = false; break;
+                            case LangType.L_TEXT: default: found = false; break;
                         }
                         break;
                 }
@@ -606,10 +477,7 @@ namespace CodeStats
             return language;
         }
 
-        public static bool EnoughTimePassed(DateTime now)
-        {
-            return _lastActivity < now.AddMilliseconds(-1 * pulseFrequency) && _lastPulse < now.AddMilliseconds(-1 * pulseFrequency);
-        }
+        public static bool EnoughTimePassed(DateTime now) { return _lastActivity < now.AddMilliseconds(-1 * pulseFrequency) && _lastPulse < now.AddMilliseconds(-1 * pulseFrequency); }
 
         public static void GetSettings(bool skipRead = false)
         {
@@ -682,31 +550,17 @@ namespace CodeStats
 
                 if (match.Success)
                 {
-                    var username = match.Groups[2].Value;
-                    var password = match.Groups[3].Value;
-                    var address = match.Groups[4].Value;
-                    var port = match.Groups[5].Value;
-
-                    var credentials = new NetworkCredential(username, password);
-                    proxy = new WebProxy(string.Join(":", new string[] { address, port }), true, null, credentials);
+                    var credentials = new NetworkCredential(match.Groups[2].Value, match.Groups[3].Value);
+                    proxy = new WebProxy($"{match.Groups[4].Value}:{match.Groups[5].Value}", true, null, credentials);
                     return proxy;
                 }
 
                 var regProxy = new Regex(@"\s*(https?:\/\/)?([^\s@]+):(\d+)\s*");
                 match = regProxy.Match(proxyStr);
 
-                if (match.Success)
-                {
-                    var address = match.Groups[2].Value;
-                    var port = int.Parse(match.Groups[3].Value);
-                    proxy = new WebProxy(address, port);
-                    return proxy;
-                }
+                if (match.Success) return new WebProxy(match.Groups[2].Value, int.Parse(match.Groups[3].Value));
             }
-            catch (Exception ex)
-            {
-                Logger.Error("Exception while parsing the proxy string", ex);
-            }
+            catch (Exception ex) { Logger.Error("Exception while parsing the proxy string", ex); }
             return proxy;
         }
 
@@ -730,41 +584,18 @@ namespace CodeStats
             {
                 FlushCurrentPulseIfNeeded();
                 pulseProcessor_tokensource.Cancel();
-
-                if (timer != null)
-                {
-                    timer.Stop();
-                    timer.Elapsed -= ProcessPulses;
-                    timer.Dispose();
-                    timer = null;
-                }
-
-                try
-                {
-                    if (pulseProcessor != null) pulseProcessor.Wait();
-                }
-                catch (Exception ex) { Logger.Error("Exception while waiting for pulse processor to be cancelled", ex); }
+                if (timer != null) { timer.Stop(); timer.Elapsed -= ProcessPulses; timer.Dispose(); timer = null; }
+                try { if (pulseProcessor != null) pulseProcessor.Wait(); } catch { }
 
                 var jsonSerializer = new JavaScriptSerializer();
-                Pulse result;
                 var unsavedPulses = new List<Pulse>();
-                while (pulseQueue.TryDequeue(out result))
-                {
-                    if (!result.isEmpty()) unsavedPulses.Add(result);
-                }
-                if (unsavedPulses.Count > 0)
-                {
-                    var path = ConfigFile.GetUnsavedPulsesFilePath();
-                    string json = jsonSerializer.Serialize(unsavedPulses);
-                    File.WriteAllText(path, json);
-                }
+                Pulse result;
+                while (pulseQueue.TryDequeue(out result)) { if (!result.isEmpty()) unsavedPulses.Add(result); }
+                
+                if (unsavedPulses.Count > 0) File.WriteAllText(ConfigFile.GetUnsavedPulsesFilePath(), jsonSerializer.Serialize(unsavedPulses));
                 Logger.FlushEverything();
             }
-            catch (Exception ex)
-            {
-                Logger.Error("Exception while performing plugin shutdown cleanup", ex);
-                Logger.FlushEverything();
-            }
+            catch (Exception ex) { Logger.Error("Exception while performing plugin shutdown cleanup", ex); Logger.FlushEverything(); }
         }
     }
 }
