@@ -54,7 +54,7 @@ namespace CodeStats
 
         static bool nppStarted = false;
 
-        // 记录上一次文档的总长度，用于计算差分（核心修复）
+        // 记录上一次文档的总长度，用于计算差分
         private static int _lastDocLength = -1;
 
         static Dictionary<string, string> extensionMapping;
@@ -68,16 +68,11 @@ namespace CodeStats
         private static HttpClient pulseProcessor_client;
         private static HttpClientHandler pulseProcessor_httpClientHandler;
 
-        // =====================================================================
-        // 【修复报错】：自己引入原生的 Windows API，绕过底层库缺少重载的问题
-        // =====================================================================
         [DllImport("user32.dll", CharSet = CharSet.Auto)]
         public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, ref int lParam);
 
         [DllImport("user32.dll", CharSet = CharSet.Auto)]
         public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
-        // =====================================================================
-
         #endregion
 
         internal static void CommandMenuInit()
@@ -254,14 +249,12 @@ namespace CodeStats
                 nppStarted = true;
                 UpdateStatusbar();
 
-                // 初始化长度基准
                 int which = 0;
                 SendMessage(PluginBase.nppData._nppHandle, (uint)NppMsg.NPPM_GETCURRENTSCINTILLA, IntPtr.Zero, ref which);
                 IntPtr curScintilla = (which == 0) ? PluginBase.nppData._scintillaMainHandle : PluginBase.nppData._scintillaSecondHandle;
                 _lastDocLength = SendMessage(curScintilla, 2006 /* SCI_GETLENGTH */, IntPtr.Zero, IntPtr.Zero).ToInt32();
             }
 
-            // 切换标签时重新获取基准
             if (notification.Header.Code == (uint)NppMsg.NPPN_BUFFERACTIVATED)
             {
                 int which = 0;
@@ -275,11 +268,11 @@ namespace CodeStats
                 HandleActivity();
             }
 
-            // ================== 【新增：支持中文输入统计（SCI_GETLENGTH 差分法）】 ==================
+            // ================== 【核心修改：支持中文且按 10 XP/字符 计算】 ==================
             if (nppStarted && notification.Header.Code == (uint)SciMsg.SCN_MODIFIED)
             {
+                // 只要发生文本插入就处理，不再强制判断 isUser（防止输入法上屏被拦截）
                 bool isInsert = (notification.ModificationType & (int)SciMsg.SC_MOD_INSERTTEXT) != 0;
-                bool isUser = (notification.ModificationType & (int)SciMsg.SC_PERFORMED_USER) != 0;
 
                 int which = 0;
                 SendMessage(PluginBase.nppData._nppHandle, (uint)NppMsg.NPPM_GETCURRENTSCINTILLA, IntPtr.Zero, ref which);
@@ -287,22 +280,28 @@ namespace CodeStats
                 
                 int currentLength = SendMessage(curScintilla, 2006 /* SCI_GETLENGTH */, IntPtr.Zero, IntPtr.Zero).ToInt32();
 
-                if (isInsert && isUser)
+                if (isInsert)
                 {
                     if (_lastDocLength != -1 && currentLength > _lastDocLength)
                     {
                         int delta = currentLength - _lastDocLength;
-                        // UTF-8 编码，中文3字节，英文1字节，向上取整保证都算1点
-                        int xpToAdd = (int)Math.Ceiling((double)delta / 3.0);
                         
-                        if (xpToAdd > 15) xpToAdd = 15; // 单次上限 15
+                        // 1个汉字=3字节，除以3算出大概的字符数（向上取整）
+                        int chars = (int)Math.Ceiling((double)delta / 3.0);
+                        
+                        // 核心诉求：每个字符 = 10 经验
+                        int xpToAdd = chars * 10;
+                        
+                        // 防粘贴刷分上限：单次最多给 300 XP（也就是连续粘贴30个汉字以内都算，够意思了）
+                        if (xpToAdd > 300) xpToAdd = 300;
 
                         HandleActivity(xpToAdd);
                     }
                 }
+                // 无论插入还是删除，都要更新基准，防止错位
                 _lastDocLength = currentLength;
             }
-            // ===========================================================================================
+            // ===================================================================================
 
             int SC_PERFORMED_USER_AND_SC_MOD_DELETETEXT = (int)SciMsg.SC_PERFORMED_USER | (int)SciMsg.SC_MOD_DELETETEXT;
             if (nppStarted && notification.Header.Code == (uint)SciMsg.SCN_MODIFIED && ((notification.ModificationType & SC_PERFORMED_USER_AND_SC_MOD_DELETETEXT) == SC_PERFORMED_USER_AND_SC_MOD_DELETETEXT))
