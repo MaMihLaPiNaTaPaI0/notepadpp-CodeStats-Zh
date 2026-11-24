@@ -217,31 +217,34 @@ namespace CodeStats
             {
                 UpdateStatusbar();
             }
+            
             if (notification.Header.Code == (uint)NppMsg.NPPN_READY)
             {
                 nppStarted = true;
                 UpdateStatusbar();
-
-                int which = 0;
-                SendMessage(PluginBase.nppData._nppHandle, (uint)NppMsg.NPPM_GETCURRENTSCINTILLA, IntPtr.Zero, ref which);
-                IntPtr curScintilla = (which == 0) ? PluginBase.nppData._scintillaMainHandle : PluginBase.nppData._scintillaSecondHandle;
-                _lastDocLength = SendMessage(curScintilla, 2006, IntPtr.Zero, IntPtr.Zero).ToInt32();
+                UpdateBaseLength();
             }
 
             if (notification.Header.Code == (uint)NppMsg.NPPN_BUFFERACTIVATED)
             {
-                int which = 0;
-                SendMessage(PluginBase.nppData._nppHandle, (uint)NppMsg.NPPM_GETCURRENTSCINTILLA, IntPtr.Zero, ref which);
-                IntPtr curScintilla = (which == 0) ? PluginBase.nppData._scintillaMainHandle : PluginBase.nppData._scintillaSecondHandle;
-                _lastDocLength = SendMessage(curScintilla, 2006, IntPtr.Zero, IntPtr.Zero).ToInt32();
+                UpdateBaseLength();
             }
 
-            // 【核心霸道修改】：彻底废掉原有的按单键加 1 分的逻辑
-            // if (notification.Header.Code == (uint)SciMsg.SCN_CHARADDED) { HandleActivity(); }
-
-            if (nppStarted && notification.Header.Code == (uint)SciMsg.SCN_MODIFIED)
+            // 【核心终极方案】：不管是单字符输入还是中文插入，只要发生文本增加，就计算差分！
+            if (notification.Header.Code == (uint)SciMsg.SCN_CHARADDED || notification.Header.Code == (uint)SciMsg.SCN_MODIFIED)
             {
-                bool isInsert = (notification.ModificationType & (int)SciMsg.SC_MOD_INSERTTEXT) != 0;
+                // 保底：如果没触发 READY 信号，只要有改动就当做已启动
+                if (!nppStarted)
+                {
+                    nppStarted = true;
+                    UpdateBaseLength();
+                }
+
+                bool isInsert = (notification.Header.Code == (uint)SciMsg.SCN_CHARADDED) || 
+                                ((notification.ModificationType & (int)SciMsg.SC_MOD_INSERTTEXT) != 0);
+                
+                bool isDelete = (notification.Header.Code == (uint)SciMsg.SCN_MODIFIED) && 
+                                ((notification.ModificationType & (int)SciMsg.SC_MOD_DELETETEXT) != 0);
 
                 int which = 0;
                 SendMessage(PluginBase.nppData._nppHandle, (uint)NppMsg.NPPM_GETCURRENTSCINTILLA, IntPtr.Zero, ref which);
@@ -249,35 +252,36 @@ namespace CodeStats
                 
                 int currentLength = SendMessage(curScintilla, 2006, IntPtr.Zero, IntPtr.Zero).ToInt32();
 
-                if (isInsert)
+                if (isInsert && _lastDocLength != -1 && currentLength > _lastDocLength)
                 {
-                    if (_lastDocLength == -1) _lastDocLength = currentLength; // 安全初始化
+                    int delta = currentLength - _lastDocLength;
+                    // 1个汉字占3字节，算出大概字数（向上取整）
+                    int chars = (int)Math.Ceiling((double)delta / 3.0);
+                    
+                    // 每个字符 = 10 经验
+                    int xpToAdd = chars * 10;
+                    
+                    // 单次防粘贴上限：最多 300 XP
+                    if (xpToAdd > 300) xpToAdd = 300;
 
-                    if (currentLength > _lastDocLength)
-                    {
-                        int delta = currentLength - _lastDocLength;
-                        
-                        // 1 个汉字=3 字节，除以 3 算出字符数
-                        int chars = (int)Math.Ceiling((double)delta / 3.0);
-                        
-                        // 【核心需求】：1 个字符 = 10 点经验
-                        int xpToAdd = chars * 10;
-                        
-                        // 单次最高 300（防止大段粘贴刷分）
-                        if (xpToAdd > 300) xpToAdd = 300;
-
-                        HandleActivity(xpToAdd);
-                    }
+                    HandleActivity(xpToAdd);
                 }
+                else if (isDelete && _lastDocLength != -1 && currentLength < _lastDocLength)
+                {
+                    // 删除算 1 分
+                    HandleActivity(1);
+                }
+
                 _lastDocLength = currentLength;
             }
+        }
 
-            // 删除操作（退格键）保留加 1 分的逻辑
-            int SC_PERFORMED_USER_AND_SC_MOD_DELETETEXT = (int)SciMsg.SC_PERFORMED_USER | (int)SciMsg.SC_MOD_DELETETEXT;
-            if (nppStarted && notification.Header.Code == (uint)SciMsg.SCN_MODIFIED && ((notification.ModificationType & SC_PERFORMED_USER_AND_SC_MOD_DELETETEXT) == SC_PERFORMED_USER_AND_SC_MOD_DELETETEXT))
-            {
-                HandleActivity(1);
-            }
+        private static void UpdateBaseLength()
+        {
+            int which = 0;
+            SendMessage(PluginBase.nppData._nppHandle, (uint)NppMsg.NPPM_GETCURRENTSCINTILLA, IntPtr.Zero, ref which);
+            IntPtr curScintilla = (which == 0) ? PluginBase.nppData._scintillaMainHandle : PluginBase.nppData._scintillaSecondHandle;
+            _lastDocLength = SendMessage(curScintilla, 2006, IntPtr.Zero, IntPtr.Zero).ToInt32();
         }
 
         public static void UpdateStatusbar()
@@ -298,7 +302,6 @@ namespace CodeStats
             if (!nppStarted) return;
 
             currentCount += xpAmount;
-
             UpdateStatusbar();
 
             currentLanguage = GetCurrentLanguage();
